@@ -18,7 +18,9 @@ import (
 	"strings"
 	"sync"
 	"time"
-
+	"os"
+	"mime/multipart"
+	"bytes"
 	"github.com/smartwalle/crypto4go"
 )
 
@@ -219,21 +221,23 @@ func (this *Client) URLValues(param Param) (value url.Values, err error) {
 		p.Add("alipay_root_cert_sn", this.rootCertSN)
 	}
 
-	bytes, err := json.Marshal(param)
-	if err != nil {
-		return nil, err
-	}
-	p.Add("biz_content", string(bytes))
-
-	var ps = param.Params()
+	ps := param.Params()
 	if ps != nil {
 		for key, value := range ps {
 			if key == kAppAuthToken && value == "" {
 				continue
 			}
+			if strings.HasPrefix(value, "@") {
+				continue
+			}
 			p.Add(key, value)
 		}
 	}
+	bytes, err := json.Marshal(ps)
+	if err != nil {
+		return nil, err
+	}
+	p.Add("biz_content", string(bytes))
 
 	sign, err := signWithPKCS1v15(p, this.appPrivateKey, crypto.SHA256)
 	if err != nil {
@@ -243,21 +247,50 @@ func (this *Client) URLValues(param Param) (value url.Values, err error) {
 	return p, nil
 }
 
+
 func (this *Client) doRequest(method string, param Param, result interface{}) (err error) {
-	var buf io.Reader
+	//var buf io.Reader
+	var body = &bytes.Buffer{};
+
+	files := make(map[string]string)
+
 	if param != nil {
+		// 文件
+		ps := param.Params()
+		if ps != nil {
+			for key, value := range ps {
+				if strings.HasPrefix(value, "@") {
+					files[key] = value[1:]
+				}
+			}
+		}
 		p, err := this.URLValues(param)
 		if err != nil {
 			return err
 		}
-		buf = strings.NewReader(p.Encode())
-	}
+		//buf = strings.NewReader(p.Encode())
+		body.WriteString(p.Encode())
 
-	req, err := http.NewRequest(method, this.apiDomain, buf)
+	}
+	writer := multipart.NewWriter(body)
+
+	if len(files) > 0{
+		for key, value := range files {
+			file, _ := os.Open(value)
+			defer file.Close()
+			part, _ := writer.CreateFormFile(key, value)
+			_, err = io.Copy(part, file)
+		}
+
+	}
+	writer.Close()
+
+	req, err := http.NewRequest(method, this.apiDomain, body)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", kContentType)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
 
 	resp, err := this.Client.Do(req)
 	if resp != nil {
